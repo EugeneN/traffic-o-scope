@@ -35,6 +35,8 @@ dependencies:
 - warp >= 3.2.8
 - warp-tls >= 3.2.5
 - containers >= 0.6
+- text >= 1.2
+- sqlite-simple >= 0.4
 
 flags:
   static:

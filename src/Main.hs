@@ -8,6 +8,12 @@ module Main where
 import qualified Data.Set                    as Set
 import qualified Data.ByteString.Char8       as BS8
 import           Data.String                 (fromString)
+import qualified Data.Text                   as T
+import qualified Data.Text.Encoding          as TE
+
+import           Database.SQLite.Simple
+import           Database.SQLite.Simple.FromRow()
+
 import qualified Network.HTTP.Client         as HC
 import           Network.TLS                 as TLS
 import           Network.Wai.Handler.Warp    (HostPreference, defaultSettings,
@@ -60,7 +66,7 @@ parser = info (helper <*> opts) fullDesc
         [host, cert, key] -> Right (host, CertFile cert key)
         _                 -> Left "invalid format for ssl certificates"
 
-    opts = Opts <$> bind
+    opts = Opts <$> bind_
                 <*> (fromMaybe 3000 <$> port)
                 <*> ssl
                 <*> user
@@ -69,7 +75,7 @@ parser = info (helper <*> opts) fullDesc
                 <*> rev
                 <*> blacklist
 
-    bind = optional $ fromString <$> strOption
+    bind_ = optional $ fromString <$> strOption
         ( long "bind"
        <> short 'b'
        <> metavar "bind_ip"
@@ -118,6 +124,16 @@ parser = info (helper <*> opts) fullDesc
 setuid :: String -> IO ()
 setuid user = getUserEntryForName user >>= setUserID . userID
 
+
+data BlacklistItem = BlacklistItem Int T.Text deriving (Show)
+
+instance FromRow BlacklistItem where
+  fromRow = BlacklistItem <$> field <*> field
+
+instance ToRow BlacklistItem where
+  toRow (BlacklistItem id_ dn) = toRow (id_, dn)
+
+
 main :: IO ()
 main = do
     opts <- execParser parser
@@ -154,18 +170,30 @@ main = do
         Just f  -> Just . flip elem . filter (isJust . BS8.elemIndex ':') . BS8.lines <$> BS8.readFile f
     manager <- HC.newManager HC.defaultManagerSettings
 
-    blacklist <- case _black opts of
-        Nothing -> pure Nothing
-        Just f  -> Just . Set.fromList . filter ((> 0) . BS8.length) . BS8.lines <$> BS8.readFile f
+    conn <- open "t-o-s.db"
+    execute_ conn "CREATE TABLE IF NOT EXISTS blacklist (id INTEGER PRIMARY KEY, domainname TEXT)"
 
+    let readBlacklist = do
+          r <- query_ conn "SELECT * from blacklist" :: IO [BlacklistItem]
+          pure $ case r of
+            [] -> Nothing
+            _ -> Just . Set.fromList . fmap (\(BlacklistItem _ n) -> n) $ r
+
+    blacklist <- case _black opts of
+        Nothing -> do
+          putStrLn "Importing existing blacklist"
+          readBlacklist
+              
+        Just f  -> do
+          xs <- Set.fromList . fmap TE.decodeUtf8 . filter ((> 0) . BS8.length) . BS8.lines <$> BS8.readFile f
+          putStrLn $ "Importing new blacklist of " <> show (Set.size xs) <> " entries."
+          executeMany conn "INSERT INTO blacklist (domainname) VALUES (?)" $ fmap Only (Set.toList xs)
+          readBlacklist
+            
     let pset = ProxySettings pauth Nothing (BS8.pack <$> _ws opts) (BS8.pack <$> _rev opts)
         proxy = (if isSSL then forceSSL else id) $ gzip def $ httpProxy blacklist pset manager $ reverseProxy pset manager dumbApp
         port = _port opts
-
-    case blacklist of
-      Nothing -> putStrLn "No active blacklist."
-      Just x  -> putStrLn $ "Blacklist active with " <> show (Set.size x) <> " entries."
-
+      
     putStrLn "Running"
 
     runner (setHost (fromMaybe "*6" (_bind opts)) $ setPort port settings) proxy

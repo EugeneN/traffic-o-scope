@@ -28,7 +28,9 @@ import qualified Data.CaseInsensitive       as CI
 import qualified Data.Conduit.Network       as CN
 import           Data.Maybe                 (fromJust, fromMaybe, isJust,
                                              isNothing)
-import qualified Data.Set                   as Set                                             
+import qualified Data.Set                   as Set      
+import qualified Data.Text                  as T   
+import qualified Data.Text.Encoding         as TE                                    
 import qualified Network.HTTP.Client        as HC
 import           Network.HTTP.ReverseProxy  (ProxyDest (..), SetIpHeader (..),
                                              WaiProxyResponse (..),
@@ -60,7 +62,7 @@ dumbApp _req respond =
                      , "</body></html>"
                      ]
 
-httpProxy :: Maybe (Set.Set BS.ByteString) -> ProxySettings -> HC.Manager -> Middleware
+httpProxy :: Maybe (Set.Set T.Text) -> ProxySettings -> HC.Manager -> Middleware
 httpProxy black set mgr = pacProvider . httpGetProxy black set mgr . httpConnectProxy set
 
 forceSSL :: Middleware
@@ -213,7 +215,7 @@ reverseProxy pset mgr fallback
                                      , not (isToStripHeader hdn) && hdn /= HT.hHost
                                      ]
 
-httpGetProxy :: Maybe (Set.Set BS.ByteString) -> ProxySettings -> HC.Manager -> Middleware
+httpGetProxy :: Maybe (Set.Set T.Text) -> ProxySettings -> HC.Manager -> Middleware
 httpGetProxy black pset mgr fallback = waiProxyToSettings proxyResponseFor settings mgr
   where
     settings = defaultWaiProxySettings { wpsSetIpHeader = SIHNone }
@@ -235,7 +237,7 @@ httpGetProxy black pset mgr fallback = waiProxyToSettings proxyResponseFor setti
         defaultPort = 80
         hostHeader = parseHostPortWithDefault defaultPort <$> requestHeaderHost req
 
-        isBlocked  = fromMaybe False $ Set.member <$> (fst <$> hostHeader) <*> black
+        isBlocked  = fromMaybe False $ Set.member <$> (TE.decodeUtf8 . fst <$> hostHeader) <*> black
         logBlocked = BS8.putStrLn $ "Blocked: " <> showHostHeader hostHeader
         logPassed  = BS8.putStrLn $ showHostHeader hostHeader
 
