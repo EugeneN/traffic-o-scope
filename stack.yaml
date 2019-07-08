@@ -1,0 +1,12 @@
+resolver: lts-13.25
+packages:
+- '.'
+extra-deps:
+- tls-1.5.0
+- warp-tls-3.2.5
+- github: bjin/wai
+  commit: http2-scheme
+  subdirs:
+  - warp
+flags: {}
+extra-package-dbs: []
