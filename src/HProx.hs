@@ -12,6 +12,7 @@ module HProx
   , reverseProxy
   , forceSSL
   , dumbApp
+  , BlacklistItem(..)
   ) where
 
 import           Control.Applicative        ((<|>))
@@ -30,7 +31,10 @@ import           Data.Maybe                 (fromJust, fromMaybe, isJust,
                                              isNothing)
 import qualified Data.Set                   as Set      
 import qualified Data.Text                  as T   
-import qualified Data.Text.Encoding         as TE                                    
+import qualified Data.Text.Encoding         as TE 
+import           Data.Time.Clock    
+import           Database.SQLite.Simple     
+import           Database.SQLite.Simple.FromRow()                          
 import qualified Network.HTTP.Client        as HC
 import           Network.HTTP.ReverseProxy  (ProxyDest (..), SetIpHeader (..),
                                              WaiProxyResponse (..),
@@ -51,6 +55,30 @@ data ProxySettings = ProxySettings
   , revRemote  :: Maybe BS.ByteString
   }
 
+data BlacklistItem = BlacklistItem Int T.Text deriving (Show)
+
+instance FromRow BlacklistItem where
+  fromRow = BlacklistItem <$> field <*> field
+
+instance ToRow BlacklistItem where
+  toRow (BlacklistItem id_ dn) = toRow (id_, dn)
+
+data BlockedItem = BlockedItem UTCTime T.Text deriving (Show)
+
+instance FromRow BlockedItem where
+  fromRow = BlockedItem <$> field <*> field
+
+instance ToRow BlockedItem where
+  toRow (BlockedItem dt dn) = toRow (dt, dn)
+
+data AllowedItem = AllowedItem UTCTime T.Text deriving (Show)
+
+instance FromRow AllowedItem where
+  fromRow = AllowedItem <$> field <*> field
+
+instance ToRow AllowedItem where
+  toRow (AllowedItem dt dn) = toRow (dt, dn)
+
 dumbApp :: Application
 dumbApp _req respond =
     respond $ responseLBS
@@ -62,8 +90,8 @@ dumbApp _req respond =
                      , "</body></html>"
                      ]
 
-httpProxy :: Maybe (Set.Set T.Text) -> ProxySettings -> HC.Manager -> Middleware
-httpProxy black set mgr = pacProvider . httpGetProxy black set mgr . httpConnectProxy set
+httpProxy :: Maybe (Set.Set T.Text) -> Connection -> ProxySettings -> HC.Manager -> Middleware
+httpProxy black conn set mgr = pacProvider . httpGetProxy black conn set mgr . httpConnectProxy set
 
 forceSSL :: Middleware
 forceSSL app req respond
@@ -215,17 +243,16 @@ reverseProxy pset mgr fallback
                                      , not (isToStripHeader hdn) && hdn /= HT.hHost
                                      ]
 
-httpGetProxy :: Maybe (Set.Set T.Text) -> ProxySettings -> HC.Manager -> Middleware
-httpGetProxy black pset mgr fallback = waiProxyToSettings proxyResponseFor settings mgr
+httpGetProxy :: Maybe (Set.Set T.Text) -> Connection -> ProxySettings -> HC.Manager -> Middleware
+httpGetProxy black conn pset mgr fallback = waiProxyToSettings proxyResponseFor settings mgr
   where
     settings = defaultWaiProxySettings { wpsSetIpHeader = SIHNone }
-
     proxyResponseFor req
-        | isBlocked          = logBlocked >> pure (WPRResponse (accessDeniedResponse pset))
-        | redirectWebsocket  = logPassed  >> pure (WPRProxyDest (ProxyDest wsHost wsPort))
-        | not isGetProxy     = logPassed  >> pure (WPRApplication fallback)
-        | checkAuth pset req = logPassed  >> pure (WPRModifiedRequest nreq (ProxyDest host port))
-        | otherwise          = logPassed  >> pure (WPRResponse (proxyAuthRequiredResponse pset))
+        | isBlocked          = logBlocked req >> pure (WPRResponse (accessDeniedResponse pset))
+        | redirectWebsocket  = logPassed  req >> pure (WPRProxyDest (ProxyDest wsHost wsPort))
+        | not isGetProxy     = logPassed  req >> pure (WPRApplication fallback)
+        | checkAuth pset req = logPassed  req >> pure (WPRModifiedRequest nreq (ProxyDest host port))
+        | otherwise          = logPassed  req >> pure (WPRResponse (proxyAuthRequiredResponse pset))
       where
         isWebsocket = wpsUpgradeToRaw defaultWaiProxySettings req
         redirectWebsocket = isWebsocket && isJust (wsRemote pset)
@@ -238,10 +265,19 @@ httpGetProxy black pset mgr fallback = waiProxyToSettings proxyResponseFor setti
         hostHeader = parseHostPortWithDefault defaultPort <$> requestHeaderHost req
 
         isBlocked  = fromMaybe False $ Set.member <$> (TE.decodeUtf8 . fst <$> hostHeader) <*> black
-        logBlocked = BS8.putStrLn $ "Blocked: " <> showHostHeader hostHeader
-        logPassed  = BS8.putStrLn $ showHostHeader hostHeader
 
-        showHostHeader hh' = fromMaybe "Nothing" $ fmap (\hh -> fst hh <> ":" <> BS8.pack (show $ snd hh)) hh'
+        logBlocked _ = do
+          now <- getCurrentTime
+          execute conn "INSERT INTO blocked (datetime, domainname) VALUES (?,?)" $ BlockedItem now (TE.decodeUtf8 $ showHostHeader hostHeader)
+          BS8.putStrLn $ "Blocked: " <> showTime now <> " " <> showHostHeader hostHeader
+
+        logPassed _ = do 
+          now <- getCurrentTime
+          execute conn "INSERT INTO allowed (datetime, domainname) VALUES (?,?)" $ AllowedItem now (TE.decodeUtf8 $ showHostHeader hostHeader)
+          BS8.putStrLn $ showTime now <> " " <> showHostHeader hostHeader
+
+        showHostHeader hh' = fromMaybe "Nothing" $ fmap (\hh -> fst hh <> ":" <> (BS8.pack . show . snd $ hh)) hh'
+        showTime = BS8.pack . show
 
         isRawPathProxy = rawPathPrefix `BS.isPrefixOf` rawPath
         hasProxyHeader = any (isProxyHeader.fst) (requestHeaders req)

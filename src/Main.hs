@@ -8,11 +8,9 @@ module Main where
 import qualified Data.Set                    as Set
 import qualified Data.ByteString.Char8       as BS8
 import           Data.String                 (fromString)
-import qualified Data.Text                   as T
 import qualified Data.Text.Encoding          as TE
 
 import           Database.SQLite.Simple
-import           Database.SQLite.Simple.FromRow()
 
 import qualified Network.HTTP.Client         as HC
 import           Network.TLS                 as TLS
@@ -31,7 +29,7 @@ import           Data.Maybe
 import           Data.Monoid                 ((<>))
 import           Options.Applicative
 
-import           HProx                       (ProxySettings (..), dumbApp,
+import           HProx                       (ProxySettings (..), BlacklistItem (..), dumbApp,
                                               forceSSL, httpProxy, reverseProxy)
 
 data Opts = Opts
@@ -125,15 +123,6 @@ setuid :: String -> IO ()
 setuid user = getUserEntryForName user >>= setUserID . userID
 
 
-data BlacklistItem = BlacklistItem Int T.Text deriving (Show)
-
-instance FromRow BlacklistItem where
-  fromRow = BlacklistItem <$> field <*> field
-
-instance ToRow BlacklistItem where
-  toRow (BlacklistItem id_ dn) = toRow (id_, dn)
-
-
 main :: IO ()
 main = do
     opts <- execParser parser
@@ -172,6 +161,8 @@ main = do
 
     conn <- open "t-o-s.db"
     execute_ conn "CREATE TABLE IF NOT EXISTS blacklist (id INTEGER PRIMARY KEY, domainname TEXT)"
+    execute_ conn "CREATE TABLE IF NOT EXISTS blocked (datetime TEXT, domainname TEXT)"
+    execute_ conn "CREATE TABLE IF NOT EXISTS allowed (datetime TEXT, domainname TEXT)"
 
     let readBlacklist = do
           r <- query_ conn "SELECT * from blacklist" :: IO [BlacklistItem]
@@ -191,7 +182,7 @@ main = do
           readBlacklist
             
     let pset = ProxySettings pauth Nothing (BS8.pack <$> _ws opts) (BS8.pack <$> _rev opts)
-        proxy = (if isSSL then forceSSL else id) $ gzip def $ httpProxy blacklist pset manager $ reverseProxy pset manager dumbApp
+        proxy = (if isSSL then forceSSL else id) $ gzip def $ httpProxy blacklist conn pset manager $ reverseProxy pset manager dumbApp
         port = _port opts
       
     putStrLn "Running"

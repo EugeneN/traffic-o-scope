@@ -37,6 +37,7 @@ dependencies:
 - containers >= 0.6
 - text >= 1.2
 - sqlite-simple >= 0.4
+- time >= 1.8
 
 flags:
   static:
