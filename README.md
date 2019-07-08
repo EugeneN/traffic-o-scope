@@ -4,6 +4,8 @@ This is Traffic-o-scope, an application designed to give users back the power to
 
 The codebase is derived from the `hprox` http proxy.
 
+The backlist is derived from the Pi-Hole project.
+
 ---
 
 ## hprox

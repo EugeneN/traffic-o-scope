@@ -235,7 +235,7 @@ httpGetProxy black pset mgr fallback = waiProxyToSettings proxyResponseFor setti
         defaultPort = 80
         hostHeader = parseHostPortWithDefault defaultPort <$> requestHeaderHost req
 
-        isBlocked = fromMaybe False $ Set.member <$> (fst <$> hostHeader) <*> black
+        isBlocked  = fromMaybe False $ Set.member <$> (fst <$> hostHeader) <*> black
         logBlocked = BS8.putStrLn $ "Blocked: " <> showHostHeader hostHeader
         logPassed  = BS8.putStrLn $ showHostHeader hostHeader
 

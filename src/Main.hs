@@ -130,7 +130,7 @@ main = do
         otherCerts = tail $ zip (map fst certfiles) certs
 
         settings = setNoParsePath True $
-                   setServerName "Apache" $
+                   setServerName "Traffic-o-scope" $
                    maybe id (setBeforeMainLoop . setuid) (_user opts)
                    defaultSettings
 
