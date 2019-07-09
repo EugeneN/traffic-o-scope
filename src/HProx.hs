@@ -86,20 +86,71 @@ instance FromRow Count where
 
 
 adminApp :: Connection -> Application
-adminApp conn _req respond = do
-  blacklist <- query_ conn "SELECT count(*) from blacklist" :: IO [Count]
-  blocked   <- query_ conn "SELECT count(*) from blocked"   :: IO [Count]
-  allowed   <- query_ conn "SELECT count(*) from allowed"   :: IO [Count]
+adminApp conn req respond = do
+  resp <- case pathInfo req of
+    [] -> do
+      blacklist <- query_ conn "SELECT count(*) from blacklist" :: IO [Count]
+      blocked   <- query_ conn "SELECT count(*) from blocked"   :: IO [Count]
+      allowed   <- query_ conn "SELECT count(*) from allowed"   :: IO [Count]
+
+      pure $ responseLBS
+        HT.status200
+        [("Content-Type", "text/html")] $
+        LBS8.unlines [ "<html><body><h1>Dashboard</h1>"
+                     , "<p>Items in the <a href='/blacklist'>blacklist</a>: " <> (LBS8.pack . show . uncount . head $ blacklist) <> "</p>"
+                     , "<p>Items <a href='/blocked'>blocked</a>: "            <> (LBS8.pack . show . uncount . head $ blocked)   <> "</p>"
+                     , "<p>Items <a href='/allowed'>allowed</a>: "            <> (LBS8.pack . show . uncount . head $ allowed)   <> "</p>"
+                     , "</body></html>"
+                     ]
+
+
+    ["blacklist"] -> do
+      r <- query_ conn "SELECT * from blacklist" :: IO [BlacklistItem]
+      pure $ responseLBS
+        HT.status200
+        [("Content-Type", "text/html")] $
+        LBS8.unlines ([ "<html><body>"
+                      , "<p><a href='/'>Back to dashboard</a></p>"
+                      , "<h1>Blacklist</h1>"
+                      , "<ul>" ] 
+                      <> fmap (\(BlacklistItem _ x) -> "<li>" <> (LBS8.pack . T.unpack $ x) <> "</li>") r <>
+                      [ "</ul>"
+                      , "</body></html>" ])
+
+    ["blocked"]   -> do
+      r <- query_ conn "SELECT * from blocked" :: IO [BlockedItem]
+      pure $ responseLBS
+        HT.status200
+        [("Content-Type", "text/html")] $
+        LBS8.unlines ([ "<html><body>"
+                      , "<p><a href='/'>Back to dashboard</a></p>"
+                      , "<h1>Blocked</h1>"
+                      , "<ul>" ] 
+                      <> fmap (\(BlockedItem t x) -> "<li><span>" <> (LBS8.pack . show $ t) <> "</span><span>" <> (LBS8.pack . T.unpack $ x) <> "</span></li>") r <>
+                      [ "</ul>"
+                      , "</body></html>" ])
+    ["allowed"]   -> do
+      r <- query_ conn "SELECT * from allowed" :: IO [AllowedItem]
+      pure $ responseLBS
+        HT.status200
+        [("Content-Type", "text/html")] $
+        LBS8.unlines ([ "<html><body>"
+                      , "<p><a href='/'>Back to dashboard</a></p>"
+                      , "<h1>Allowed</h1>"
+                      , "<ul>" ] 
+                      <> fmap (\(AllowedItem t x) -> "<li><span>" <> (LBS8.pack . show $ t) <> "</span><span>" <> (LBS8.pack . T.unpack $ x) <> "</span></li>") r <>
+                      [ "</ul>"
+                      , "</body></html>" ])
+
+    _xs -> pure $ responseLBS
+      HT.status200
+      [("Content-Type", "text/html")] $
+      LBS8.unlines  [ "<html><body>"
+                    , "<p><a href='/'>Back to dashboard</a></p>"
+                    , "<h1>Not found</h1>"
+                    ] 
   
-  respond $ responseLBS
-    HT.status200
-    [("Content-Type", "text/html")] $
-    LBS8.unlines [ "<html><body><h1>Stats</h1>"
-                , "<p>Items in the blacklist: " <> (LBS8.pack . show . uncount . head $ blacklist) <> "</p>"
-                , "<p>Items blocked: "          <> (LBS8.pack . show . uncount . head $ blocked)   <> "</p>"
-                , "<p>Items allowed: "          <> (LBS8.pack . show . uncount . head $ allowed)   <> "</p>"
-                , "</body></html>"
-                ]
+  respond resp 
 
 
 dumbApp :: Application
