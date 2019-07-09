@@ -12,6 +12,7 @@ module HProx
   , reverseProxy
   , forceSSL
   , dumbApp
+  , adminApp
   , BlacklistItem(..)
   ) where
 
@@ -78,6 +79,28 @@ instance FromRow AllowedItem where
 
 instance ToRow AllowedItem where
   toRow (AllowedItem dt dn) = toRow (dt, dn)
+
+newtype Count = Count { uncount :: Integer}
+instance FromRow Count where
+  fromRow = Count <$> field
+
+
+adminApp :: Connection -> Application
+adminApp conn _req respond = do
+  blacklist <- query_ conn "SELECT count(*) from blacklist" :: IO [Count]
+  blocked   <- query_ conn "SELECT count(*) from blocked"   :: IO [Count]
+  allowed   <- query_ conn "SELECT count(*) from allowed"   :: IO [Count]
+  
+  respond $ responseLBS
+    HT.status200
+    [("Content-Type", "text/html")] $
+    LBS8.unlines [ "<html><body><h1>Stats</h1>"
+                , "<p>Items in the blacklist: " <> (LBS8.pack . show . uncount . head $ blacklist) <> "</p>"
+                , "<p>Items blocked: "          <> (LBS8.pack . show . uncount . head $ blocked)   <> "</p>"
+                , "<p>Items allowed: "          <> (LBS8.pack . show . uncount . head $ allowed)   <> "</p>"
+                , "</body></html>"
+                ]
+
 
 dumbApp :: Application
 dumbApp _req respond =

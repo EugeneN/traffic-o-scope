@@ -1,10 +1,12 @@
 -- SPDX-License-Identifier: Apache-2.0
 --
 -- Copyright (C) 2019 Bin Jin. All Rights Reserved.
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
+import           Control.Concurrent          (ThreadId, forkIO)
 import qualified Data.Set                    as Set
 import qualified Data.ByteString.Char8       as BS8
 import           Data.String                 (fromString)
@@ -17,7 +19,7 @@ import           Network.TLS                 as TLS
 import           Network.Wai.Handler.Warp    (HostPreference, defaultSettings,
                                               runSettings, setBeforeMainLoop,
                                               setHost, setNoParsePath, setPort,
-                                              setServerName)
+                                              setServerName, run)
 import           Network.Wai.Handler.WarpTLS (OnInsecure (..), onInsecure,
                                               runTLS, tlsServerHooks,
                                               tlsSettings)
@@ -30,11 +32,12 @@ import           Data.Monoid                 ((<>))
 import           Options.Applicative
 
 import           HProx                       (ProxySettings (..), BlacklistItem (..), dumbApp,
-                                              forceSSL, httpProxy, reverseProxy)
+                                              forceSSL, httpProxy, reverseProxy, adminApp)
 
 data Opts = Opts
   { _bind  :: Maybe HostPreference
-  , _port  :: Int
+  , _pport  :: Int
+  , _aport :: Int
   , _ssl   :: [(String, CertFile)]
   , _user  :: Maybe String
   , _auth  :: Maybe FilePath
@@ -47,6 +50,12 @@ data CertFile = CertFile
   { certfile :: FilePath
   , keyfile  :: FilePath
   }
+
+adminPort :: Int
+adminPort = 3333 
+
+proxyPort :: Int
+proxyPort = 3000 
 
 readCert :: CertFile -> IO TLS.Credential
 readCert (CertFile c k) = either error id <$> TLS.credentialLoadX509 c k
@@ -65,7 +74,8 @@ parser = info (helper <*> opts) fullDesc
         _                 -> Left "invalid format for ssl certificates"
 
     opts = Opts <$> bind_
-                <*> (fromMaybe 3000 <$> port)
+                <*> (fromMaybe proxyPort <$> pport)
+                <*> (fromMaybe adminPort <$> aport)
                 <*> ssl
                 <*> user
                 <*> auth
@@ -79,11 +89,16 @@ parser = info (helper <*> opts) fullDesc
        <> metavar "bind_ip"
        <> help "ip address to bind on (default: all interfaces)")
 
-    port = optional $ option auto
-        ( long "port"
+    pport = optional $ option auto
+        ( long "pport"
        <> short 'p'
        <> metavar "port"
-       <> help "port number (default 3000)")
+       <> help ("proxy port number (default " <> show proxyPort <> ")"))
+    
+    aport = optional $ option auto
+        ( long "aport"
+       <> metavar "port"
+       <> help ("admin port number (default " <> show adminPort <> ")"))
 
     ssl = many $ option (eitherReader parseSSL)
         ( long "tls"
@@ -172,19 +187,22 @@ main = do
 
     blacklist <- case _black opts of
         Nothing -> do
-          putStrLn "Importing existing blacklist"
+          putStrLn "Using existing blacklist"
           readBlacklist
               
         Just f  -> do
           xs <- Set.fromList . fmap TE.decodeUtf8 . filter ((> 0) . BS8.length) . BS8.lines <$> BS8.readFile f
           putStrLn $ "Importing new blacklist of " <> show (Set.size xs) <> " entries."
           executeMany conn "INSERT INTO blacklist (domainname) VALUES (?)" $ fmap Only (Set.toList xs)
+          execute conn "delete from blacklist where rowid not in (select min(rowid) from blacklist group by domainname)" ()
           readBlacklist
             
     let pset = ProxySettings pauth Nothing (BS8.pack <$> _ws opts) (BS8.pack <$> _rev opts)
         proxy = (if isSSL then forceSSL else id) $ gzip def $ httpProxy blacklist conn pset manager $ reverseProxy pset manager dumbApp
-        port = _port opts
-      
+        port = _pport opts
+
+    _adminWorkerThreadId :: ThreadId <- forkIO $ run (_aport opts) (adminApp conn) 
+    
     putStrLn "Running"
 
     runner (setHost (fromMaybe "*6" (_bind opts)) $ setPort port settings) proxy
