@@ -1,7 +1,10 @@
 -- SPDX-License-Identifier: Apache-2.0
 --
 -- Copyright (C) 2019 Bin Jin. All Rights Reserved.
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE DeriveAnyClass     #-}
+{-# LANGUAGE DeriveGeneric      #-}
 
 module HProx
   ( ProxySettings(..)
@@ -16,11 +19,14 @@ module HProx
   , BlacklistItem(..)
   ) where
 
+import qualified GHC.Generics as GHC
 import           Control.Applicative        ((<|>))
 import           Control.Concurrent.Async   (concurrently)
 import           Control.Exception          (SomeException, try)
 import           Control.Monad              (unless, void, when, forM_)
 import           Control.Monad.IO.Class     (liftIO)
+import           Data.Aeson
+import           Data.Aeson.Types
 import qualified Data.Binary.Builder        as BB
 import qualified Data.ByteString            as BS
 import           Data.ByteString.Base64     (decodeLenient)
@@ -48,6 +54,7 @@ import           Network.Wai.Util           (queryLookup)
 
 import           Data.Conduit
 import           Network.Wai
+import           Network.Wai.Internal        (Request(..))
 
 import qualified Text.Blaze.Html5            as H
 import qualified Text.Blaze.Html5.Attributes as A
@@ -121,8 +128,6 @@ adminApp conn req respond = do
           qs   = queryString req
           goto = queryLookup ("back" :: BS8.ByteString) qs
 
-      print bs
-      
       case (cmd, val) of
         (Just cmd', Just val') -> do
           case cmd' of
@@ -174,8 +179,25 @@ adminApp conn req respond = do
                           H.! A.method "POST" $ do
                             H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "unblock"
                             H.input  H.! A.type_ "hidden" H.! A.name "val" H.! A.value (H.toValue x)
-                            H.button H.! A.type_ "submit" $ "[x]"
+                            H.button H.! A.type_ "submit" $ "Unblock"
       in htmlPage t b
+
+
+    unblockForm back = 
+      H.form 
+      H.! A.action ("/cmd?back=" <> back)
+        H.! A.method "POST" $ do
+          H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "unblock"
+          H.input  H.! A.type_ "text"   H.! A.name "val" H.! A.value ""
+          H.button H.! A.type_ "submit" $ "Unblock"
+
+    blockForm back = 
+      H.form 
+        H.! A.action ("/cmd?back=" <> back)
+        H.! A.method "POST" $ do
+          H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "block"
+          H.input  H.! A.type_ "text"   H.! A.name "val" H.! A.value ""
+          H.button H.! A.type_ "submit" $ "Block"
 
     blockedH r = 
       let t = "Blocked"
@@ -183,20 +205,8 @@ adminApp conn req respond = do
                 H.p $ do
                   H.a H.! A.href "/" $ "Back to dashboard"
                 H.h1 "Blocked"
-                H.p $ do
-                  H.form 
-                    H.! A.action "/cmd?back=/blocked"
-                    H.! A.method "POST" $ do
-                      H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "block"
-                      H.input  H.! A.type_ "text"   H.! A.name "val" H.! A.value ""
-                      H.button H.! A.type_ "submit" $ "Block"
-                H.p $ do
-                  H.form 
-                    H.! A.action "/cmd?back=/blocked"
-                    H.! A.method "POST" $ do
-                      H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "unblock"
-                      H.input  H.! A.type_ "text"   H.! A.name "val" H.! A.value ""
-                      H.button H.! A.type_ "submit" $ "Unblock"
+                H.p $ blockForm   "/blocked"
+                H.p $ unblockForm "/blocked"
                 H.ul $ 
                   forM_ r $ \(BlockedItem x y) -> 
                     H.li $ do
@@ -208,7 +218,7 @@ adminApp conn req respond = do
                           H.! A.method "POST" $ do
                             H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "unblock"
                             H.input  H.! A.type_ "hidden" H.! A.name "val" H.! A.value (H.toValue y)
-                            H.button H.! A.type_ "submit" $ "[x]"
+                            H.button H.! A.type_ "submit" $ "Unblock"
 
       in htmlPage t b
     
@@ -218,17 +228,28 @@ adminApp conn req respond = do
                 H.p $ do
                   H.a H.! A.href "/" $ "Back to dashboard"
                 H.h1 "Allowed"
+                H.p $ blockForm   "/allowed"
+                H.p $ unblockForm "/allowed"
                 H.ul $ 
                   forM_ r $ \(AllowedItem x y) -> 
                     H.li $ do
                       H.span $ H.toHtml $ show x
                       H.span $ H.toHtml y
+                      H.span $ do
+                        H.form 
+                          H.! A.action "/cmd?back=/allowed"
+                          H.! A.method "POST" $ do
+                            H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "block"
+                            H.input  H.! A.type_ "hidden" H.! A.name "val" H.! A.value (H.toValue y)
+                            H.button H.! A.type_ "submit" $ "Block"
       in htmlPage t b
 
     dashboardH blacklist blocked allowed = 
       let t = "Dashboard" 
           b = H.div $ do
                 H.h1 "Dashboard"
+                H.p $ blockForm   "/"
+                H.p $ unblockForm "/"
                 H.p $ do
                   "Items in the "
                   H.a H.! A.href "/blacklist" $ "blacklist"
