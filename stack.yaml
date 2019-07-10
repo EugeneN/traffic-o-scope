@@ -4,6 +4,8 @@ packages:
 extra-deps:
 - tls-1.5.0
 - warp-tls-3.2.5
+- wai-util-0.8@sha256:7181e748ccd405ecef5a586c954acb3d62b55b8eb7368efb5d80d6bf38e8211b
+- http-accept-0.2@sha256:c55935f6ff4984aee96ebc130cc9aa6919d322becb613c049a81203cec9fe65e
 - github: bjin/wai
   commit: http2-scheme
   subdirs:

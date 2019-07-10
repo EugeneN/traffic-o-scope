@@ -29,8 +29,7 @@ import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.CaseInsensitive       as CI
 import qualified Data.Conduit.Network       as CN
 import           Data.Maybe                 (fromJust, fromMaybe, isJust,
-                                             isNothing)
-import qualified Data.Set                   as Set      
+                                             isNothing, listToMaybe)
 import qualified Data.Text                  as T   
 import qualified Data.Text.Encoding         as TE 
 import           Data.Time.Clock    
@@ -45,6 +44,7 @@ import           Network.HTTP.ReverseProxy  (ProxyDest (..), SetIpHeader (..),
 import qualified Network.HTTP.Types         as HT
 import qualified Network.HTTP.Types.Header  as HT
 import           Network.Wai.Internal       (getRequestBodyChunk)
+import           Network.Wai.Util           (queryLookup)
 
 import           Data.Conduit
 import           Network.Wai
@@ -52,6 +52,7 @@ import           Network.Wai
 import qualified Text.Blaze.Html5            as H
 import qualified Text.Blaze.Html5.Attributes as A
 import           Text.Blaze.Html.Renderer.Pretty (renderHtml)
+import qualified Data.ByteString.Lazy as LZ
 
 data ProxySettings = ProxySettings
   { proxyAuth  :: Maybe (BS.ByteString -> Bool)
@@ -110,14 +111,44 @@ adminApp conn req respond = do
     ["allowed"]   -> do
       r <- query_ conn "SELECT * from allowed" :: IO [AllowedItem]
       pure $ respOk $ allowedH r
-      -- (LBS8.pack . show $ t) (LBS8.pack . T.unpack $ x)
+    
+    ["cmd"]   -> do
+      body <- strictRequestBody req
+      let as   = LBS8.split '&' body
+          bs   = fmap (listToTuple . LBS8.split '=') as
+          cmd  = fmap snd $ listToMaybe . filter ((==) "cmd" . fst) $ bs
+          val  = fmap (TE.decodeUtf8 . LZ.toStrict . snd) $ listToMaybe . filter ((==) "val" . fst) $ bs
+          qs   = queryString req
+          goto = queryLookup ("back" :: BS8.ByteString) qs
 
-    _xs -> pure $ respOk $ notFoundH
+      print bs
+      
+      case (cmd, val) of
+        (Just cmd', Just val') -> do
+          case cmd' of
+            "block"   -> do
+              putStrLn $ "Got block cmd for " <> T.unpack val'
+              execute conn "insert into blacklist (domainname) VALUES (?) " (Only val')
+            "unblock" -> do
+              putStrLn $ "Got unblock cmd for " <> T.unpack val'
+              execute conn "delete from blacklist where domainname = ? " (Only val')
+            _         -> putStrLn $ "Got unknown cmd " <> show cmd'
+
+        _ -> putStrLn $ "Can't parse cmd: " <> show (cmd, val)
+
+      pure $ respRedirect $ BS8.pack . T.unpack $ fromMaybe "/" goto
+
+    _xs -> pure $ resp404 $ notFoundH
   
   respond resp 
 
   where
-    respOk x = responseLBS HT.status200 [("Content-Type", "text/html")] $ LBS8.pack . renderHtml $ x
+    respOk  x = responseLBS HT.status200 [("Content-Type", "text/html")] $ LBS8.pack . renderHtml $ x
+    resp404 x = responseLBS HT.status404 [("Content-Type", "text/html")] $ LBS8.pack . renderHtml $ x
+    respRedirect uri = responseLBS HT.status301 [("Location", uri)] LZ.empty
+
+    listToTuple [x, y] = (x, y)
+    listToTuple _ = error "listToTuple"
 
     notFoundH = 
       let t = "Not found"
@@ -134,7 +165,16 @@ adminApp conn req respond = do
                   H.a H.! A.href "/" $ "Back to dashboard"
                 H.h1 "Blacklist"
                 H.ul $ 
-                  forM_ r (\(BlacklistItem _ x) -> H.li $ H.toHtml x)
+                  forM_ r $ \(BlacklistItem _ x) -> 
+                    H.li $ do
+                      H.span $ H.toHtml x
+                      H.span $ do
+                        H.form 
+                          H.! A.action "/cmd?back=/blacklist"
+                          H.! A.method "POST" $ do
+                            H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "unblock"
+                            H.input  H.! A.type_ "hidden" H.! A.name "val" H.! A.value (H.toValue x)
+                            H.button H.! A.type_ "submit" $ "[x]"
       in htmlPage t b
 
     blockedH r = 
@@ -143,11 +183,33 @@ adminApp conn req respond = do
                 H.p $ do
                   H.a H.! A.href "/" $ "Back to dashboard"
                 H.h1 "Blocked"
+                H.p $ do
+                  H.form 
+                    H.! A.action "/cmd?back=/blocked"
+                    H.! A.method "POST" $ do
+                      H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "block"
+                      H.input  H.! A.type_ "text"   H.! A.name "val" H.! A.value ""
+                      H.button H.! A.type_ "submit" $ "Block"
+                H.p $ do
+                  H.form 
+                    H.! A.action "/cmd?back=/blocked"
+                    H.! A.method "POST" $ do
+                      H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "unblock"
+                      H.input  H.! A.type_ "text"   H.! A.name "val" H.! A.value ""
+                      H.button H.! A.type_ "submit" $ "Unblock"
                 H.ul $ 
                   forM_ r $ \(BlockedItem x y) -> 
                     H.li $ do
                       H.span $ H.toHtml $ show x
                       H.span $ H.toHtml y
+                      H.span $ do
+                        H.form 
+                          H.! A.action "/cmd?back=/blocked"
+                          H.! A.method "POST" $ do
+                            H.input  H.! A.type_ "hidden" H.! A.name "cmd" H.! A.value "unblock"
+                            H.input  H.! A.type_ "hidden" H.! A.name "val" H.! A.value (H.toValue y)
+                            H.button H.! A.type_ "submit" $ "[x]"
+
       in htmlPage t b
     
     allowedH r = 
@@ -205,8 +267,8 @@ dumbApp _req respond =
                      , "</body></html>"
                      ]
 
-httpProxy :: Maybe (Set.Set T.Text) -> Connection -> ProxySettings -> HC.Manager -> Middleware
-httpProxy black conn set mgr = pacProvider . httpGetProxy black conn set mgr . httpConnectProxy set
+httpProxy :: Connection -> ProxySettings -> HC.Manager -> Middleware
+httpProxy conn set mgr = pacProvider . httpGetProxy conn set mgr . httpConnectProxy set
 
 forceSSL :: Middleware
 forceSSL app req respond
@@ -358,16 +420,14 @@ reverseProxy pset mgr fallback
                                      , not (isToStripHeader hdn) && hdn /= HT.hHost
                                      ]
 
-httpGetProxy :: Maybe (Set.Set T.Text) -> Connection -> ProxySettings -> HC.Manager -> Middleware
-httpGetProxy black conn pset mgr fallback = waiProxyToSettings proxyResponseFor settings mgr
+httpGetProxy :: Connection -> ProxySettings -> HC.Manager -> Middleware
+httpGetProxy conn pset mgr fallback = waiProxyToSettings proxyResponseFor settings mgr
   where
     settings = defaultWaiProxySettings { wpsSetIpHeader = SIHNone }
-    proxyResponseFor req
-        | isBlocked          = logBlocked req >> pure (WPRResponse (accessDeniedResponse pset))
-        | redirectWebsocket  = logPassed  req >> pure (WPRProxyDest (ProxyDest wsHost wsPort))
-        | not isGetProxy     = logPassed  req >> pure (WPRApplication fallback)
-        | checkAuth pset req = logPassed  req >> pure (WPRModifiedRequest nreq (ProxyDest host port))
-        | otherwise          = logPassed  req >> pure (WPRResponse (proxyAuthRequiredResponse pset))
+    proxyResponseFor req = do
+      isBlocked <- checkBlocked $ TE.decodeUtf8 . fst <$> hostHeader
+      go req isBlocked
+        
       where
         isWebsocket = wpsUpgradeToRaw defaultWaiProxySettings req
         redirectWebsocket = isWebsocket && isJust (wsRemote pset)
@@ -379,19 +439,31 @@ httpGetProxy black conn pset mgr fallback = waiProxyToSettings proxyResponseFor 
         defaultPort = 80
         hostHeader = parseHostPortWithDefault defaultPort <$> requestHeaderHost req
 
-        isBlocked  = fromMaybe False $ Set.member <$> (TE.decodeUtf8 . fst <$> hostHeader) <*> black
+        go req' isBlocked
+          | isBlocked           = logBlocked req' >> pure (WPRResponse (accessDeniedResponse pset))
+          | redirectWebsocket   = logPassed  req' >> pure (WPRProxyDest (ProxyDest wsHost wsPort))
+          | not isGetProxy      = logPassed  req' >> pure (WPRApplication fallback)
+          | checkAuth pset req' = logPassed  req' >> pure (WPRModifiedRequest nreq (ProxyDest host port))
+          | otherwise           = logPassed  req' >> pure (WPRResponse (proxyAuthRequiredResponse pset))
+
+        checkBlocked Nothing = pure True 
+        checkBlocked (Just x) = do 
+          r <- query conn "SELECT * from blacklist where domainname like ?" (Only x) :: IO [BlacklistItem]
+          pure $ case listToMaybe r of
+            Nothing -> False
+            Just _  -> True
 
         logBlocked _ = do
           now <- getCurrentTime
-          execute conn "INSERT INTO blocked (datetime, domainname) VALUES (?,?)" $ BlockedItem now (TE.decodeUtf8 $ showHostHeader hostHeader)
+          execute conn "INSERT INTO blocked (datetime, domainname) VALUES (?,?)" $ (now, (TE.decodeUtf8 $ showHostHeader hostHeader))
           BS8.putStrLn $ "Blocked: " <> showTime now <> " " <> showHostHeader hostHeader
 
         logPassed _ = do 
           now <- getCurrentTime
-          execute conn "INSERT INTO allowed (datetime, domainname) VALUES (?,?)" $ AllowedItem now (TE.decodeUtf8 $ showHostHeader hostHeader)
+          execute conn "INSERT INTO allowed (datetime, domainname) VALUES (?,?)" $ (now, (TE.decodeUtf8 $ showHostHeader hostHeader))
           BS8.putStrLn $ showTime now <> " " <> showHostHeader hostHeader
 
-        showHostHeader hh' = fromMaybe "Nothing" $ fmap (\hh -> fst hh <> ":" <> (BS8.pack . show . snd $ hh)) hh'
+        showHostHeader = fromMaybe "Nothing" . fmap fst
         showTime = BS8.pack . show
 
         isRawPathProxy = rawPathPrefix `BS.isPrefixOf` rawPath

@@ -31,7 +31,7 @@ import           Data.Maybe
 import           Data.Monoid                 ((<>))
 import           Options.Applicative
 
-import           HProx                       (ProxySettings (..), BlacklistItem (..), dumbApp,
+import           HProx                       (ProxySettings (..), dumbApp,
                                               forceSSL, httpProxy, reverseProxy, adminApp)
 
 data Opts = Opts
@@ -179,26 +179,18 @@ main = do
     execute_ conn "CREATE TABLE IF NOT EXISTS blocked (datetime TEXT, domainname TEXT)"
     execute_ conn "CREATE TABLE IF NOT EXISTS allowed (datetime TEXT, domainname TEXT)"
 
-    let readBlacklist = do
-          r <- query_ conn "SELECT * from blacklist" :: IO [BlacklistItem]
-          pure $ case r of
-            [] -> Nothing
-            _ -> Just . Set.fromList . fmap (\(BlacklistItem _ n) -> n) $ r
-
-    blacklist <- case _black opts of
+    case _black opts of
         Nothing -> do
           putStrLn "Using existing blacklist"
-          readBlacklist
               
         Just f  -> do
           xs <- Set.fromList . fmap TE.decodeUtf8 . filter ((> 0) . BS8.length) . BS8.lines <$> BS8.readFile f
           putStrLn $ "Importing new blacklist of " <> show (Set.size xs) <> " entries."
           executeMany conn "INSERT INTO blacklist (domainname) VALUES (?)" $ fmap Only (Set.toList xs)
           execute conn "delete from blacklist where rowid not in (select min(rowid) from blacklist group by domainname)" ()
-          readBlacklist
             
     let pset = ProxySettings pauth Nothing (BS8.pack <$> _ws opts) (BS8.pack <$> _rev opts)
-        proxy = (if isSSL then forceSSL else id) $ gzip def $ httpProxy blacklist conn pset manager $ reverseProxy pset manager dumbApp
+        proxy = (if isSSL then forceSSL else id) $ gzip def $ httpProxy conn pset manager $ reverseProxy pset manager dumbApp
         port = _pport opts
 
     _adminWorkerThreadId :: ThreadId <- forkIO $ run (_aport opts) (adminApp conn) 
