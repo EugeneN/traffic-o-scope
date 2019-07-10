@@ -38,6 +38,7 @@ dependencies:
 - text >= 1.2
 - sqlite-simple >= 0.4
 - time >= 1.8
+- blaze-html >= 0.8
 
 flags:
   static:

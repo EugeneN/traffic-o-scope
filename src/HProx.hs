@@ -19,7 +19,7 @@ module HProx
 import           Control.Applicative        ((<|>))
 import           Control.Concurrent.Async   (concurrently)
 import           Control.Exception          (SomeException, try)
-import           Control.Monad              (unless, void, when)
+import           Control.Monad              (unless, void, when, forM_)
 import           Control.Monad.IO.Class     (liftIO)
 import qualified Data.Binary.Builder        as BB
 import qualified Data.ByteString            as BS
@@ -48,6 +48,10 @@ import           Network.Wai.Internal       (getRequestBodyChunk)
 
 import           Data.Conduit
 import           Network.Wai
+
+import qualified Text.Blaze.Html5            as H
+import qualified Text.Blaze.Html5.Attributes as A
+import           Text.Blaze.Html.Renderer.Pretty (renderHtml)
 
 data ProxySettings = ProxySettings
   { proxyAuth  :: Maybe (BS.ByteString -> Bool)
@@ -93,64 +97,101 @@ adminApp conn req respond = do
       blocked   <- query_ conn "SELECT count(*) from blocked"   :: IO [Count]
       allowed   <- query_ conn "SELECT count(*) from allowed"   :: IO [Count]
 
-      pure $ responseLBS
-        HT.status200
-        [("Content-Type", "text/html")] $
-        LBS8.unlines [ "<html><body><h1>Dashboard</h1>"
-                     , "<p>Items in the <a href='/blacklist'>blacklist</a>: " <> (LBS8.pack . show . uncount . head $ blacklist) <> "</p>"
-                     , "<p>Items <a href='/blocked'>blocked</a>: "            <> (LBS8.pack . show . uncount . head $ blocked)   <> "</p>"
-                     , "<p>Items <a href='/allowed'>allowed</a>: "            <> (LBS8.pack . show . uncount . head $ allowed)   <> "</p>"
-                     , "</body></html>"
-                     ]
-
+      pure $ respOk $ dashboardH blacklist blocked allowed
 
     ["blacklist"] -> do
       r <- query_ conn "SELECT * from blacklist" :: IO [BlacklistItem]
-      pure $ responseLBS
-        HT.status200
-        [("Content-Type", "text/html")] $
-        LBS8.unlines ([ "<html><body>"
-                      , "<p><a href='/'>Back to dashboard</a></p>"
-                      , "<h1>Blacklist</h1>"
-                      , "<ul>" ] 
-                      <> fmap (\(BlacklistItem _ x) -> "<li>" <> (LBS8.pack . T.unpack $ x) <> "</li>") r <>
-                      [ "</ul>"
-                      , "</body></html>" ])
+      pure $ respOk $ blacklistH r
 
     ["blocked"]   -> do
       r <- query_ conn "SELECT * from blocked" :: IO [BlockedItem]
-      pure $ responseLBS
-        HT.status200
-        [("Content-Type", "text/html")] $
-        LBS8.unlines ([ "<html><body>"
-                      , "<p><a href='/'>Back to dashboard</a></p>"
-                      , "<h1>Blocked</h1>"
-                      , "<ul>" ] 
-                      <> fmap (\(BlockedItem t x) -> "<li><span>" <> (LBS8.pack . show $ t) <> "</span><span>" <> (LBS8.pack . T.unpack $ x) <> "</span></li>") r <>
-                      [ "</ul>"
-                      , "</body></html>" ])
+      pure $ respOk $ blockedH r
+
     ["allowed"]   -> do
       r <- query_ conn "SELECT * from allowed" :: IO [AllowedItem]
-      pure $ responseLBS
-        HT.status200
-        [("Content-Type", "text/html")] $
-        LBS8.unlines ([ "<html><body>"
-                      , "<p><a href='/'>Back to dashboard</a></p>"
-                      , "<h1>Allowed</h1>"
-                      , "<ul>" ] 
-                      <> fmap (\(AllowedItem t x) -> "<li><span>" <> (LBS8.pack . show $ t) <> "</span><span>" <> (LBS8.pack . T.unpack $ x) <> "</span></li>") r <>
-                      [ "</ul>"
-                      , "</body></html>" ])
+      pure $ respOk $ allowedH r
+      -- (LBS8.pack . show $ t) (LBS8.pack . T.unpack $ x)
 
-    _xs -> pure $ responseLBS
-      HT.status200
-      [("Content-Type", "text/html")] $
-      LBS8.unlines  [ "<html><body>"
-                    , "<p><a href='/'>Back to dashboard</a></p>"
-                    , "<h1>Not found</h1>"
-                    ] 
+    _xs -> pure $ respOk $ notFoundH
   
   respond resp 
+
+  where
+    respOk x = responseLBS HT.status200 [("Content-Type", "text/html")] $ LBS8.pack . renderHtml $ x
+
+    notFoundH = 
+      let t = "Not found"
+          b = H.div $ do
+                H.p $ do
+                  H.a H.! A.href "/" $ "Back to dashboard"
+                H.h1 "Not found"
+      in htmlPage t b
+
+    blacklistH r = 
+      let t = "Blacklist"
+          b = H.div $ do
+                H.p $ do
+                  H.a H.! A.href "/" $ "Back to dashboard"
+                H.h1 "Blacklist"
+                H.ul $ 
+                  forM_ r (\(BlacklistItem _ x) -> H.li $ H.toHtml x)
+      in htmlPage t b
+
+    blockedH r = 
+      let t = "Blocked"
+          b = H.div $ do
+                H.p $ do
+                  H.a H.! A.href "/" $ "Back to dashboard"
+                H.h1 "Blocked"
+                H.ul $ 
+                  forM_ r $ \(BlockedItem x y) -> 
+                    H.li $ do
+                      H.span $ H.toHtml $ show x
+                      H.span $ H.toHtml y
+      in htmlPage t b
+    
+    allowedH r = 
+      let t = "Allowed"
+          b = H.div $ do
+                H.p $ do
+                  H.a H.! A.href "/" $ "Back to dashboard"
+                H.h1 "Allowed"
+                H.ul $ 
+                  forM_ r $ \(AllowedItem x y) -> 
+                    H.li $ do
+                      H.span $ H.toHtml $ show x
+                      H.span $ H.toHtml y
+      in htmlPage t b
+
+    dashboardH blacklist blocked allowed = 
+      let t = "Dashboard" 
+          b = H.div $ do
+                H.h1 "Dashboard"
+                H.p $ do
+                  "Items in the "
+                  H.a H.! A.href "/blacklist" $ "blacklist"
+                  ": "
+                  H.toHtml $ show . uncount . head $ blacklist
+                H.p $ do
+                  "Items in "
+                  H.a H.! A.href "/blocked" $ "blocked"
+                  ": "
+                  H.toHtml $ show . uncount . head $ blocked
+                H.p $ do
+                  "Items in "
+                  H.a H.! A.href "/allowed" $ "allowed"
+                  ": "
+                  H.toHtml $ show . uncount . head $ allowed
+      in htmlPage t b
+
+    htmlPage :: H.Html -> H.Html -> H.Html
+    htmlPage t b = 
+      H.docTypeHtml $ do
+        H.head $ do
+          H.meta H.! A.charset "utf-8"
+          H.title t
+        H.body H.! A.id "body" $ do
+          b
 
 
 dumbApp :: Application
@@ -158,7 +199,7 @@ dumbApp _req respond =
     respond $ responseLBS
         HT.status200
         [("Content-Type", "text/html")] $
-        LBS8.unlines [ "<html><body><h1>It works!</h1>"
+        LBS8.unlines [ "<html><body><h1>It worksH.!</h1>"
                      , "<p>This is the default web page for this server.</p>"
                      , "<p>The web server software is running but no content has been added, yet.</p>"
                      , "</body></html>"
