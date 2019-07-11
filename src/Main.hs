@@ -176,7 +176,7 @@ main = do
 
     conn <- open "t-o-s.db"
     execute_ conn "CREATE TABLE IF NOT EXISTS blacklist (id INTEGER PRIMARY KEY, domainname TEXT)"
-    execute_ conn "CREATE TABLE IF NOT EXISTS blocked (datetime TEXT, domainname TEXT)"
+    execute_ conn "CREATE TABLE IF NOT EXISTS blocked (datetime TEXT, domainname TEXT, request TEXT)"
     execute_ conn "CREATE TABLE IF NOT EXISTS allowed (datetime TEXT, domainname TEXT)"
 
     case _black opts of

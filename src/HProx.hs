@@ -5,6 +5,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE DeriveAnyClass     #-}
 {-# LANGUAGE DeriveGeneric      #-}
+{-# LANGUAGE FlexibleInstances      #-}
 
 module HProx
   ( ProxySettings(..)
@@ -33,6 +34,7 @@ import           Data.ByteString.Base64     (decodeLenient)
 import qualified Data.ByteString.Char8      as BS8
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.CaseInsensitive       as CI
+import           Data.CaseInsensitive       (CI(..))
 import qualified Data.Conduit.Network       as CN
 import           Data.Maybe                 (fromJust, fromMaybe, isJust,
                                              isNothing, listToMaybe)
@@ -40,7 +42,7 @@ import qualified Data.Text                  as T
 import qualified Data.Text.Encoding         as TE 
 import           Data.Time.Clock    
 import           Database.SQLite.Simple     
-import           Database.SQLite.Simple.FromRow()                          
+import           Database.SQLite.Simple.FromRow()       
 import qualified Network.HTTP.Client        as HC
 import           Network.HTTP.ReverseProxy  (ProxyDest (..), SetIpHeader (..),
                                              WaiProxyResponse (..),
@@ -76,13 +78,13 @@ instance FromRow BlacklistItem where
 instance ToRow BlacklistItem where
   toRow (BlacklistItem id_ dn) = toRow (id_, dn)
 
-data BlockedItem = BlockedItem UTCTime T.Text deriving (Show)
+data BlockedItem = BlockedItem UTCTime T.Text T.Text deriving (Show)
 
 instance FromRow BlockedItem where
-  fromRow = BlockedItem <$> field <*> field
+  fromRow = BlockedItem <$> field <*> field <*> field
 
 instance ToRow BlockedItem where
-  toRow (BlockedItem dt dn) = toRow (dt, dn)
+  toRow (BlockedItem dt dn rq) = toRow (dt, dn, rq)
 
 data AllowedItem = AllowedItem UTCTime T.Text deriving (Show)
 
@@ -96,6 +98,31 @@ newtype Count = Count { uncount :: Integer}
 instance FromRow Count where
   fromRow = Count <$> field
 
+data SavedRequest = 
+  SavedRequest
+    { s_requestMethod          :: HT.Method
+    , s_rawPathInfo            :: BS8.ByteString
+    , s_rawQueryString         :: BS8.ByteString
+    , s_requestHeaders         :: HT.RequestHeaders
+    , s_requestBody            :: BS8.ByteString
+    , s_requestHeaderHost      :: Maybe BS8.ByteString
+    , s_requestHeaderRange     :: Maybe BS8.ByteString
+    , s_requestHeaderReferer   :: Maybe BS8.ByteString
+    , s_requestHeaderUserAgent :: Maybe BS8.ByteString
+    } deriving (GHC.Generic, Show, FromJSON, ToJSON)
+
+instance (CI.FoldCase a, FromJSON a) => FromJSON (CI a) where
+  parseJSON (Object o) = CI.mk <$> (o .: "original")
+  parseJSON v          = typeMismatch "CI a" v
+
+instance (CI.FoldCase a, ToJSON a) => ToJSON (CI a) where
+  toJSON x = object [ "original"   .= CI.original x ]
+
+instance FromJSON BS8.ByteString where
+  parseJSON v = BS8.pack . T.unpack <$> (parseJSON v :: Parser T.Text)
+
+instance ToJSON BS8.ByteString where
+  toJSON = toJSON . T.pack . BS8.unpack
 
 adminApp :: Connection -> Application
 adminApp conn req respond = do
@@ -208,7 +235,7 @@ adminApp conn req respond = do
                 H.p $ blockForm   "/blocked"
                 H.p $ unblockForm "/blocked"
                 H.ul $ 
-                  forM_ r $ \(BlockedItem x y) -> 
+                  forM_ r $ \(BlockedItem x y _z) -> 
                     H.li $ do
                       H.span $ H.toHtml $ show x
                       H.span $ H.toHtml y
@@ -474,13 +501,28 @@ httpGetProxy conn pset mgr fallback = waiProxyToSettings proxyResponseFor settin
             Nothing -> False
             Just _  -> True
 
-        logBlocked _ = do
+        logBlocked req = do
           now <- getCurrentTime
-          execute conn "INSERT INTO blocked (datetime, domainname) VALUES (?,?)" $ (now, (TE.decodeUtf8 $ showHostHeader hostHeader))
+          print req
+          b <- requestBody req
+          let sr = SavedRequest
+                    { s_requestMethod          = requestMethod req
+                    , s_rawPathInfo            = rawPathInfo req
+                    , s_rawQueryString         = rawQueryString req
+                    , s_requestHeaders         = requestHeaders req
+                    , s_requestBody            = b
+                    , s_requestHeaderHost      = requestHeaderHost req
+                    , s_requestHeaderRange     = requestHeaderRange req
+                    , s_requestHeaderReferer   = requestHeaderReferer req
+                    , s_requestHeaderUserAgent = requestHeaderUserAgent req
+                    } 
+              sr' = T.pack . BS8.unpack . LZ.toStrict . encode $ sr
+          execute conn "INSERT INTO blocked (datetime, domainname, request) VALUES (?,?,?)" $ (now, (TE.decodeUtf8 $ showHostHeader hostHeader), sr')
           BS8.putStrLn $ "Blocked: " <> showTime now <> " " <> showHostHeader hostHeader
 
         logPassed _ = do 
           now <- getCurrentTime
+          print req
           execute conn "INSERT INTO allowed (datetime, domainname) VALUES (?,?)" $ (now, (TE.decodeUtf8 $ showHostHeader hostHeader))
           BS8.putStrLn $ showTime now <> " " <> showHostHeader hostHeader
 
