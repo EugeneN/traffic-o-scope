@@ -146,6 +146,9 @@ adminApp conn req respond = do
       r <- query_ conn "SELECT * from allowed" :: IO [AllowedItem]
       pure $ respOk $ allowedH r
     
+    ["itworks"]   -> do
+      pure $ respOk itWorks
+    
     ["cmd"]   -> do
       body <- strictRequestBody req
       let as   = LBS8.split '&' body
@@ -175,10 +178,6 @@ adminApp conn req respond = do
   respond resp 
 
   where
-    respOk  x = responseLBS HT.status200 [("Content-Type", "text/html")] $ LBS8.pack . renderHtml $ x
-    resp404 x = responseLBS HT.status404 [("Content-Type", "text/html")] $ LBS8.pack . renderHtml $ x
-    respRedirect uri = responseLBS HT.status301 [("Location", uri)] LZ.empty
-
     listToTuple [x, y] = (x, y)
     listToTuple _ = error "listToTuple"
 
@@ -294,26 +293,32 @@ adminApp conn req respond = do
                   H.toHtml $ show . uncount . head $ allowed
       in htmlPage t b
 
-    htmlPage :: H.Html -> H.Html -> H.Html
-    htmlPage t b = 
-      H.docTypeHtml $ do
-        H.head $ do
-          H.meta H.! A.charset "utf-8"
-          H.title t
-        H.body H.! A.id "body" $ do
-          b
 
+respOk       x   = responseLBS HT.status200 [("Content-Type", "text/html")] $ LBS8.pack . renderHtml $ x
+resp404      x   = responseLBS HT.status404 [("Content-Type", "text/html")] $ LBS8.pack . renderHtml $ x
+respRedirect uri = responseLBS HT.status301 [("Location", uri)] LZ.empty
+  
+htmlPage :: H.Html -> H.Html -> H.Html
+htmlPage t b = 
+  H.docTypeHtml $ do
+    H.head $ do
+      H.meta H.! A.charset "utf-8"
+      H.title t
+    H.body H.! A.id "body" $ do
+      b
+
+itWorks :: H.Html
+itWorks = 
+  htmlPage 
+    "It works!" $ 
+    H.div $ do
+      H.h1 "It works!"
+      H.p "This is the default web page for this server."
+      H.p "The web server software is running but no content has been added, yet."
 
 dumbApp :: Application
 dumbApp _req respond =
-    respond $ responseLBS
-        HT.status200
-        [("Content-Type", "text/html")] $
-        LBS8.unlines [ "<html><body><h1>It worksH.!</h1>"
-                     , "<p>This is the default web page for this server.</p>"
-                     , "<p>The web server software is running but no content has been added, yet.</p>"
-                     , "</body></html>"
-                     ]
+    respond $ respOk itWorks
 
 httpProxy :: Connection -> ProxySettings -> HC.Manager -> Middleware
 httpProxy conn set mgr = pacProvider . httpGetProxy conn set mgr . httpConnectProxy set

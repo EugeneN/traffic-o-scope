@@ -3,6 +3,7 @@
 -- Copyright (C) 2019 Bin Jin. All Rights Reserved.
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
 module Main where
 
@@ -19,7 +20,7 @@ import           Network.TLS                 as TLS
 import           Network.Wai.Handler.Warp    (HostPreference, defaultSettings,
                                               runSettings, setBeforeMainLoop,
                                               setHost, setNoParsePath, setPort,
-                                              setServerName, run)
+                                              setServerName)
 import           Network.Wai.Handler.WarpTLS (OnInsecure (..), onInsecure,
                                               runTLS, tlsServerHooks,
                                               tlsSettings)
@@ -137,64 +138,94 @@ parser = info (helper <*> opts) fullDesc
 setuid :: String -> IO ()
 setuid user = getUserEntryForName user >>= setUserID . userID
 
-
 main :: IO ()
 main = do
-    opts <- execParser parser
+    opts    <- execParser parser
+    (isSSL, runnerProxy, runnerService) <- setupRunners opts
 
-    let certfiles = _ssl opts
-    certs <- mapM (readCert.snd) certfiles
+    conn    <- setupStorage "t-o-s.db"
+    proxy   <- setupProxy isSSL opts conn
 
-    let isSSL = not (null certfiles)
-        (primaryHost, primaryCert) = head certfiles
-        otherCerts = tail $ zip (map fst certfiles) certs
+    let (proxySettings, serviceSettings) = setupSettings opts
 
-        settings = setNoParsePath True $
-                   setServerName "Traffic-o-scope" $
-                   maybe id (setBeforeMainLoop . setuid) (_user opts)
-                   defaultSettings
+    putStrLn "Checking blacklists"
+    importBlacklist opts conn
 
-        tlsset' = tlsSettings (certfile primaryCert) (keyfile primaryCert)
-        hooks = (tlsServerHooks tlsset') { onServerNameIndication = onSNI }
-        tlsset = tlsset' { tlsServerHooks = hooks, onInsecure = AllowInsecure }
+    putStrLn "Running service thread"
+    _adminWorkerThreadId :: ThreadId <- forkIO $ runnerService serviceSettings (adminApp conn) 
 
-        failSNI = fail "SNI" >> return mempty
-        onSNI Nothing = failSNI
-        onSNI (Just host)
-          | host == primaryHost = return mempty
-          | otherwise           = case lookup host otherCerts of
-              Nothing   -> failSNI
-              Just cert -> return (TLS.Credentials [cert])
+    putStrLn "Running proxy thread"
+    runnerProxy proxySettings proxy
 
-        runner | isSSL     = runTLS tlsset
-               | otherwise = runSettings
+    where
+      setupProxy isSSL opts conn = do
+        pauth   <- setupAuth opts
+        manager <- HC.newManager HC.defaultManagerSettings
+        let pset = ProxySettings pauth Nothing (BS8.pack <$> _ws opts) (BS8.pack <$> _rev opts)
+        pure $ (if isSSL then forceSSL else id) $ gzip def $ httpProxy conn pset manager $ reverseProxy pset manager dumbApp
 
-    pauth <- case _auth opts of
-        Nothing -> return Nothing
-        Just f  -> Just . flip elem . filter (isJust . BS8.elemIndex ':') . BS8.lines <$> BS8.readFile f
-    manager <- HC.newManager HC.defaultManagerSettings
+      setupSettings opts = 
+        let settings = setNoParsePath False $
+                       setServerName "Traffic-o-scope" $
+                       maybe id (setBeforeMainLoop . setuid) (_user opts)
+                       defaultSettings
 
-    conn <- open "t-o-s.db"
-    execute_ conn "CREATE TABLE IF NOT EXISTS blacklist (id INTEGER PRIMARY KEY, domainname TEXT)"
-    execute_ conn "CREATE TABLE IF NOT EXISTS blocked (datetime TEXT, domainname TEXT, request TEXT)"
-    execute_ conn "CREATE TABLE IF NOT EXISTS allowed (datetime TEXT, domainname TEXT)"
+            serviceSettings = setHost (fromMaybe "*6" (_bind opts)) $ setPort (_aport opts) settings
+            proxySettings   = setHost (fromMaybe "*6" (_bind opts)) $ setPort (_pport opts) settings
+        in (proxySettings, serviceSettings)
 
-    case _black opts of
-        Nothing -> do
-          putStrLn "Using existing blacklist"
-              
-        Just f  -> do
-          xs <- Set.fromList . fmap TE.decodeUtf8 . filter ((> 0) . BS8.length) . BS8.lines <$> BS8.readFile f
-          putStrLn $ "Importing new blacklist of " <> show (Set.size xs) <> " entries."
-          executeMany conn "INSERT INTO blacklist (domainname) VALUES (?)" $ fmap Only (Set.toList xs)
-          execute conn "delete from blacklist where rowid not in (select min(rowid) from blacklist group by domainname)" ()
+      setupAuth opts = do
+        case _auth opts of
+          Nothing -> pure Nothing
+          Just f  -> Just . flip elem . filter (isJust . BS8.elemIndex ':') . BS8.lines <$> BS8.readFile f
+
+      setupRunners opts = do 
+        let certfiles = _ssl opts
+            isSSL     = not (null certfiles)
+
+        certs <- mapM (readCert . snd) certfiles
+        let (runnerProxy, runnerService) = if isSSL then setupSSL certfiles certs else setupNoSSL
+
+        pure (isSSL, runnerProxy, runnerService)
+
+      setupSSL certfiles certs = 
+        let (primaryHost, primaryCert) = head certfiles
+            otherCerts = tail $ zip (map fst certfiles) certs
+
+            tlsset' = tlsSettings (certfile primaryCert) (keyfile primaryCert)
+            hooks   = (tlsServerHooks tlsset') { onServerNameIndication = onSNI }
+            tlsset  = tlsset' { tlsServerHooks = hooks, onInsecure = AllowInsecure }
+
+            failSNI = fail "SNI" >> return mempty
+            onSNI x = print x >> go x
+
+            go Nothing = failSNI
+            go (Just host)
+              | host == primaryHost = return mempty
+              | otherwise           = case lookup host otherCerts of
+                  Nothing   -> failSNI
+                  Just cert -> return (TLS.Credentials [cert])
+
+        -- in (runTLS tlsset, runTLS tlsset)
+        in (runSettings, runTLS tlsset)
+
+      setupNoSSL = (runSettings, runSettings)
+
+      setupStorage dbname = do
+        conn <- open dbname
+        execute_ conn "CREATE TABLE IF NOT EXISTS blacklist (id INTEGER PRIMARY KEY, domainname TEXT)"
+        execute_ conn "CREATE TABLE IF NOT EXISTS blocked (datetime TEXT, domainname TEXT, request TEXT)"
+        execute_ conn "CREATE TABLE IF NOT EXISTS allowed (datetime TEXT, domainname TEXT)"
+        pure conn
+
+      importBlacklist opts conn = do
+        case _black opts of
+          Nothing -> do
+            putStrLn "Using existing blacklist"
+                
+          Just f  -> do
+            xs <- Set.fromList . fmap TE.decodeUtf8 . filter ((> 0) . BS8.length) . BS8.lines <$> BS8.readFile f
+            putStrLn $ "Importing new blacklist of " <> show (Set.size xs) <> " entries."
+            executeMany conn "INSERT INTO blacklist (domainname) VALUES (?)" $ fmap Only (Set.toList xs)
+            execute conn "delete from blacklist where rowid not in (select min(rowid) from blacklist group by domainname)" ()
             
-    let pset = ProxySettings pauth Nothing (BS8.pack <$> _ws opts) (BS8.pack <$> _rev opts)
-        proxy = (if isSSL then forceSSL else id) $ gzip def $ httpProxy conn pset manager $ reverseProxy pset manager dumbApp
-        port = _pport opts
-
-    _adminWorkerThreadId :: ThreadId <- forkIO $ run (_aport opts) (adminApp conn) 
-    
-    putStrLn "Running"
-
-    runner (setHost (fromMaybe "*6" (_bind opts)) $ setPort port settings) proxy
